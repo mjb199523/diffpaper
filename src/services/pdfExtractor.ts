@@ -90,8 +90,8 @@ export async function extractPdf(file: File): Promise<ExtractedDocument> {
       // 3. Sort line clusters from top of page to bottom
       lineClusters.sort((a, b) => b.y - a.y);
 
-      // 4. Assemble lines exactly in reading order
-      const lines: string[] = [];
+      // 4. Assemble visual lines
+      const visualLines: { text: string; isBreak: boolean }[] = [];
       let previousClusterY: number | null = null;
       let previousClusterHeight: number = 12;
 
@@ -126,23 +126,63 @@ export async function extractPdf(file: File): Promise<ExtractedDocument> {
         const lineText = linePieces.join('').trim();
         if (lineText.length === 0) continue;
 
-        // Check if there was an intentional empty line in the PDF layout
+        let isBreak = false;
         if (previousClusterY !== null) {
           const verticalDrop = previousClusterY - cluster.y;
           const avgHeight = Math.max((previousClusterHeight + cluster.height) / 2, 10);
-          if (verticalDrop > avgHeight * 1.6) {
-            lines.push('');
+          // A physical gap > 1.5x line height marks a blank line / paragraph separation
+          if (verticalDrop > avgHeight * 1.5) {
+            isBreak = true;
           }
         }
 
-        lines.push(lineText);
+        visualLines.push({ text: lineText, isBreak });
         previousClusterY = cluster.y;
         previousClusterHeight = cluster.height;
       }
 
+      // 5. De-wrap soft line breaks within body paragraphs:
+      // Lines within the same paragraph wrap across lines in PDF fixed-width formatting.
+      // Joining wrapped lines with a single space makes the paragraph continuous and flowing,
+      // exactly like Word (.docx), eliminating the mid-sentence line skips.
+      const paragraphs: string[] = [];
+      let currentParaLines: string[] = [];
+
+      for (const item of visualLines) {
+        // Headers, bullet points, salutations, or dates are distinct structural lines
+        const isHeaderOrBullet =
+          item.isBreak ||
+          item.text.includes('|') ||
+          /^(Dear\s+|To\s+|From\s+|Re:|Subject:|Executive\s+|Ayang\s+)/i.test(item.text) ||
+          /^[•\-\*]\s+/.test(item.text) ||
+          /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(item.text) ||
+          /^[A-Z\s]{4,}$/.test(item.text);
+
+        if (isHeaderOrBullet && currentParaLines.length > 0) {
+          paragraphs.push(currentParaLines.join(' '));
+          currentParaLines = [];
+        }
+
+        if (isHeaderOrBullet) {
+          paragraphs.push(item.text);
+        } else {
+          // De-hyphenate words broken at line ends e.g. "large-" + "scale" -> "large-scale"
+          if (currentParaLines.length > 0 && currentParaLines[currentParaLines.length - 1].endsWith('-')) {
+            const last = currentParaLines.pop()!;
+            currentParaLines.push(last + item.text);
+          } else {
+            currentParaLines.push(item.text);
+          }
+        }
+      }
+
+      if (currentParaLines.length > 0) {
+        paragraphs.push(currentParaLines.join(' '));
+      }
+
       page.cleanup();
 
-      const pageText = lines.join('\n').trim();
+      const pageText = paragraphs.join('\n\n').trim();
       pages.push({
         pageNumber: i,
         text: pageText,
