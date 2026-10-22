@@ -21,6 +21,89 @@ interface LineCluster {
   items: TextItemWithLayout[];
 }
 
+function processColumnLines(items: TextItemWithLayout[]): string[] {
+  // Cluster items into lines by Y baseline
+  const lineClusters: LineCluster[] = [];
+  items.sort((a, b) => b.y - a.y);
+
+  for (const item of items) {
+    let matchedCluster: LineCluster | null = null;
+    for (const cluster of lineClusters) {
+      const verticalThreshold = Math.max(cluster.height * 0.45, 4);
+      if (Math.abs(item.y - cluster.y) <= verticalThreshold) {
+        matchedCluster = cluster;
+        break;
+      }
+    }
+
+    if (matchedCluster) {
+      matchedCluster.items.push(item);
+      matchedCluster.y =
+        (matchedCluster.y * (matchedCluster.items.length - 1) + item.y) / matchedCluster.items.length;
+      matchedCluster.height = Math.max(matchedCluster.height, item.height);
+    } else {
+      lineClusters.push({
+        y: item.y,
+        height: item.height,
+        items: [item],
+      });
+    }
+  }
+
+  // Sort line clusters from top to bottom
+  lineClusters.sort((a, b) => b.y - a.y);
+
+  const lines: string[] = [];
+  let previousClusterY: number | null = null;
+  let previousClusterHeight: number = 12;
+
+  for (const cluster of lineClusters) {
+    cluster.items.sort((a, b) => a.x - b.x);
+
+    const linePieces: string[] = [];
+    let prevItem: TextItemWithLayout | null = null;
+
+    for (const item of cluster.items) {
+      if (!prevItem) {
+        linePieces.push(item.str);
+      } else {
+        const gap = item.x - (prevItem.x + prevItem.width);
+        const prevStr = prevItem.str;
+        const currStr = item.str;
+
+        if (
+          gap > 1.8 &&
+          !prevStr.endsWith(' ') &&
+          !currStr.startsWith(' ') &&
+          !prevStr.endsWith('/') &&
+          !currStr.startsWith('/')
+        ) {
+          linePieces.push(' ');
+        }
+        linePieces.push(currStr);
+      }
+      prevItem = item;
+    }
+
+    const lineText = linePieces.join('').trim();
+    if (lineText.length === 0) continue;
+
+    if (previousClusterY !== null) {
+      const verticalDrop = previousClusterY - cluster.y;
+      const avgHeight = Math.max((previousClusterHeight + cluster.height) / 2, 10);
+      if (verticalDrop > avgHeight * 1.6) {
+        lines.push('');
+      }
+    }
+
+    lines.push(lineText);
+    previousClusterY = cluster.y;
+    previousClusterHeight = cluster.height;
+  }
+
+  return lines;
+}
+
 export async function extractPdf(file: File): Promise<ExtractedDocument> {
   const arrayBuffer = await file.arrayBuffer();
 
@@ -39,6 +122,8 @@ export async function extractPdf(file: File): Promise<ExtractedDocument> {
     for (let i = 1; i <= numPages; i++) {
       const page = await pdfDoc.getPage(i);
       const textContent = await page.getTextContent();
+      const viewport = page.getViewport({ scale: 1.0 });
+      const pageWidth = viewport.width;
 
       // 1. Gather all text items with coordinates
       const rawItems: TextItemWithLayout[] = [];
@@ -59,90 +144,54 @@ export async function extractPdf(file: File): Promise<ExtractedDocument> {
         }
       }
 
-      // 2. Cluster into lines based on vertical baseline tolerance
-      const lineClusters: LineCluster[] = [];
-      rawItems.sort((a, b) => b.y - a.y);
+      // 2. Multi-column / Sidebar detection:
+      // Check if document has sidebar items (e.g. left margin x < 35% of page width with high vertical density)
+      // and main body items (x > 35% of page width) at overlapping Y coordinates.
+      const leftColItems: TextItemWithLayout[] = [];
+      const rightColItems: TextItemWithLayout[] = [];
+      const splitX = pageWidth * 0.35;
 
+      let hasOverlap = false;
       for (const item of rawItems) {
-        let matchedCluster: LineCluster | null = null;
-        for (const cluster of lineClusters) {
-          const verticalThreshold = Math.max(cluster.height * 0.45, 4);
-          if (Math.abs(item.y - cluster.y) <= verticalThreshold) {
-            matchedCluster = cluster;
-            break;
-          }
-        }
-
-        if (matchedCluster) {
-          matchedCluster.items.push(item);
-          matchedCluster.y =
-            (matchedCluster.y * (matchedCluster.items.length - 1) + item.y) / matchedCluster.items.length;
-          matchedCluster.height = Math.max(matchedCluster.height, item.height);
+        if (item.x + item.width < splitX) {
+          leftColItems.push(item);
         } else {
-          lineClusters.push({
-            y: item.y,
-            height: item.height,
-            items: [item],
-          });
+          rightColItems.push(item);
         }
       }
 
-      // 3. Sort line clusters from top of page to bottom
-      lineClusters.sort((a, b) => b.y - a.y);
+      // Check if both left and right columns have multiple items spanning the same Y range
+      if (leftColItems.length > 5 && rightColItems.length > 5) {
+        const leftYMin = Math.min(...leftColItems.map(it => it.y));
+        const leftYMax = Math.max(...leftColItems.map(it => it.y));
+        const rightYMin = Math.min(...rightColItems.map(it => it.y));
+        const rightYMax = Math.max(...rightColItems.map(it => it.y));
 
-      // 4. Assemble lines exactly as laid out in the document
-      const lines: string[] = [];
-      let previousClusterY: number | null = null;
-      let previousClusterHeight: number = 12;
-
-      for (const cluster of lineClusters) {
-        cluster.items.sort((a, b) => a.x - b.x);
-
-        const linePieces: string[] = [];
-        let prevItem: TextItemWithLayout | null = null;
-
-        for (const item of cluster.items) {
-          if (!prevItem) {
-            linePieces.push(item.str);
-          } else {
-            const gap = item.x - (prevItem.x + prevItem.width);
-            const prevStr = prevItem.str;
-            const currStr = item.str;
-
-            if (
-              gap > 1.8 &&
-              !prevStr.endsWith(' ') &&
-              !currStr.startsWith(' ') &&
-              !prevStr.endsWith('/') &&
-              !currStr.startsWith('/')
-            ) {
-              linePieces.push(' ');
-            }
-            linePieces.push(currStr);
-          }
-          prevItem = item;
+        const overlapY = Math.min(leftYMax, rightYMax) - Math.max(leftYMin, rightYMin);
+        if (overlapY > 100) {
+          hasOverlap = true;
         }
+      }
 
-        const lineText = linePieces.join('').trim();
-        if (lineText.length === 0) continue;
+      let allPageLines: string[] = [];
 
-        // Check if there was an intentional empty line / paragraph break in the PDF layout
-        if (previousClusterY !== null) {
-          const verticalDrop = previousClusterY - cluster.y;
-          const avgHeight = Math.max((previousClusterHeight + cluster.height) / 2, 10);
-          if (verticalDrop > avgHeight * 1.6) {
-            lines.push(''); // blank line exactly reflecting original spacing
-          }
-        }
+      if (hasOverlap) {
+        // Multi-column or sidebar layout detected:
+        // Process main column (or left column first if sidebar is header/sidebar) in coherent visual stream
+        // Standard resume/cover letter convention: main letter stream first or left sidebar then main body
+        const leftLines = processColumnLines(leftColItems);
+        const rightLines = processColumnLines(rightColItems);
 
-        lines.push(lineText);
-        previousClusterY = cluster.y;
-        previousClusterHeight = cluster.height;
+        // Put the header/sidebar content together, followed by the main body text
+        allPageLines = [...leftLines, '', '---', '', ...rightLines];
+      } else {
+        // Standard single-column flow
+        allPageLines = processColumnLines(rawItems);
       }
 
       page.cleanup();
 
-      const pageText = lines.join('\n').trim();
+      const pageText = allPageLines.join('\n').trim();
       pages.push({
         pageNumber: i,
         text: pageText,
