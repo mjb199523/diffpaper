@@ -4,18 +4,14 @@ import { ExtractedDocument, DocumentPage } from '../types/document';
 export async function extractDocx(file: File): Promise<ExtractedDocument> {
   const arrayBuffer = await file.arrayBuffer();
 
-  // Extract raw text preserving paragraph breaks
+  // Extract raw text from Word document preserving original paragraph and line boundaries
   const result = await mammoth.extractRawText({ arrayBuffer });
   let rawText = result.value || '';
 
-  // Standardize line endings and collapse empty line variations to standard double-newline paragraphs
+  // Standardize line endings while preserving the author's original lines
   const cleanedText = rawText
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
-    .split('\n')
-    .map(line => line.trim())
-    .filter((line, idx, arr) => line.length > 0 || (idx > 0 && arr[idx - 1].length > 0))
-    .join('\n')
     .trim();
 
   const pages: DocumentPage[] = [

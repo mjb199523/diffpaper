@@ -90,8 +90,8 @@ export async function extractPdf(file: File): Promise<ExtractedDocument> {
       // 3. Sort line clusters from top of page to bottom
       lineClusters.sort((a, b) => b.y - a.y);
 
-      // 4. Assemble lines and measure vertical gaps between consecutive lines
-      const clusteredLines: { text: string; isParagraphBreak: boolean }[] = [];
+      // 4. Assemble lines exactly as laid out in the document
+      const lines: string[] = [];
       let previousClusterY: number | null = null;
       let previousClusterHeight: number = 12;
 
@@ -126,54 +126,23 @@ export async function extractPdf(file: File): Promise<ExtractedDocument> {
         const lineText = linePieces.join('').trim();
         if (lineText.length === 0) continue;
 
-        let isParagraphBreak = false;
+        // Check if there was an intentional empty line / paragraph break in the PDF layout
         if (previousClusterY !== null) {
           const verticalDrop = previousClusterY - cluster.y;
           const avgHeight = Math.max((previousClusterHeight + cluster.height) / 2, 10);
-          // A physical gap > 1.6x the line height signals a blank line / paragraph break in the document layout
           if (verticalDrop > avgHeight * 1.6) {
-            isParagraphBreak = true;
+            lines.push(''); // blank line exactly reflecting original spacing
           }
         }
 
-        clusteredLines.push({ text: lineText, isParagraphBreak });
+        lines.push(lineText);
         previousClusterY = cluster.y;
         previousClusterHeight = cluster.height;
       }
 
-      // 5. Build paragraphs based purely on visual gaps and explicit structural headers
-      const paragraphs: string[] = [];
-      let currentParagraph: string[] = [];
-
-      for (let idx = 0; idx < clusteredLines.length; idx++) {
-        const { text, isParagraphBreak } = clusteredLines[idx];
-
-        // Explicit structural headers or date/bullet lines are standalone paragraphs
-        const isStructuralHeader =
-          /^(Dear\s+|To\s+|From\s+|Re:|Subject:|Executive\s+|Ayang\s+)/i.test(text) ||
-          /^[•\-\*]\s+/.test(text) ||
-          /^\d{1,2}[\/\.]\d{1,2}[\/\.]\d{2,4}$/.test(text) ||
-          /^[A-Z\s]{4,}$/.test(text);
-
-        if ((isParagraphBreak || isStructuralHeader) && currentParagraph.length > 0) {
-          paragraphs.push(currentParagraph.join(' '));
-          currentParagraph = [];
-        }
-
-        if (isStructuralHeader) {
-          paragraphs.push(text);
-        } else {
-          currentParagraph.push(text);
-        }
-      }
-
-      if (currentParagraph.length > 0) {
-        paragraphs.push(currentParagraph.join(' '));
-      }
-
       page.cleanup();
 
-      const pageText = paragraphs.join('\n\n').trim();
+      const pageText = lines.join('\n').trim();
       pages.push({
         pageNumber: i,
         text: pageText,
