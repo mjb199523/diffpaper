@@ -33,36 +33,6 @@ function findPageNumber(offset: number, pageIndex: { threshold: number; pageNumb
   return pageIndex[pageIndex.length - 1].pageNumber;
 }
 
-/**
- * Hierarchical diff engine:
- * First aligns documents at the paragraph/line level so that common words like "This is"
- * or "and" in completely different paragraphs don't falsely latch across distant sections.
- * Within changed paragraph blocks, performs fine-grained word diffing.
- */
-function computeHierarchicalDiff(textA: string, textB: string, mode: ComparisonMode): Change[] {
-  const lineChanges = diffLines(textA, textB);
-  const result: Change[] = [];
-
-  for (let i = 0; i < lineChanges.length; i++) {
-    const curr = lineChanges[i];
-    const next = lineChanges[i + 1];
-
-    if (curr.removed && next && next.added) {
-      // Do word diff within this matched modified block
-      const wordDiff =
-        mode === 'ignore_formatting'
-          ? diffWords(curr.value, next.value)
-          : diffWordsWithSpace(curr.value, next.value);
-      result.push(...wordDiff);
-      i++; // skip next since it was consumed in the pair
-    } else {
-      result.push(curr);
-    }
-  }
-
-  return result;
-}
-
 export function compareDocuments(
   originalDoc: ExtractedDocument,
   revisedDoc: ExtractedDocument,
@@ -75,7 +45,11 @@ export function compareDocuments(
   // Compute diff according to selected granularity and mode
   let rawChanges: Change[] = [];
   if (granularity === 'words') {
-    rawChanges = computeHierarchicalDiff(originalCleaned, revisedCleaned, mode);
+    if (mode === 'ignore_formatting') {
+      rawChanges = diffWords(originalCleaned, revisedCleaned);
+    } else {
+      rawChanges = diffWordsWithSpace(originalCleaned, revisedCleaned);
+    }
   } else if (granularity === 'chars') {
     rawChanges = diffChars(originalCleaned, revisedCleaned);
   } else {
